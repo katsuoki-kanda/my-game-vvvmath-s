@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Voice Math Game - Chromebook Fixed</title>
+    <style>
+        :root {
+            --bg-color: #1a1a2e;
+            --accent-color: #ff2e63;
+            --voice-color: #00d2ff;
+            --text-color: #eaeaea;
+            --hud-color: #0f0;
+        }
+
+        body {
+            margin: 0; padding: 0; overflow: hidden;
+            background: var(--bg-color);
+            font-family: 'Arial Black', sans-serif;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            color: #fff;
+            touch-action: manipulation;
+        }
+        
+        #container { 
+            position: relative; 
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #start-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 200; cursor: pointer;
+        }
+        .start-btn { font-size: 40px; padding: 25px 60px; background: var(--accent-color); color: #fff; border-radius: 60px; font-weight: bold; border: 3px solid #fff; box-shadow: 0 0 20px rgba(255,46,99,0.5); }
+        #start-overlay p { font-size: 18px; margin-top: 25px; color: #ccc; }
+        
+        .hud-container {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+            z-index: 20;
+        }
+
+        .hud { font-size: clamp(20px, 5vw, 32px); font-weight: bold; color: var(--hud-color); text-shadow: 2px 2px #000; }
+        #status-text { font-size: clamp(16px, 4vw, 20px); color: #ffde00; text-align: center; margin-top: 10px; height: 1.2em; }
+
+        #question-area { position: relative; flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; width: 100%; }
+        .main-q { font-size: clamp(80px, 20vw, 150px); color: var(--accent-color); font-weight: bold; -webkit-text-stroke: 1px var(--text-color); line-height: 1.2; text-align: center; z-index: 5; }
+        #voice-instruction-hint { font-size: clamp(18px, 4vw, 28px); color: var(--voice-color); margin-top: 10px; font-weight: bold; height: 1.5em; text-align: center; }
+
+        .correct-circle {
+            position: absolute; width: 60vw; height: 60vw; max-width: 300px; max-height: 300px;
+            border: clamp(15px, 4vw, 30px) solid rgba(255, 0, 0, 0.8); border-radius: 50%; 
+            display: none; z-index: 10; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            box-shadow: 0 0 20px rgba(0,0,0,0.5); box-sizing: border-box;
+        }
+
+        #transcript-view {
+            width: 90%; max-width: 500px; font-size: clamp(14px, 3.5vw, 20px); 
+            color: #00d2ff; background: rgba(0,0,0,0.7); padding: 10px 15px; 
+            border-radius: 20px; border: 1px solid #00d2ff; text-align: center;
+            margin-bottom: 20px; min-height: 1.2em;
+        }
+    </style>
+</head>
+<body>
+
+<div id="start-overlay" onclick="handleStartInteraction()">
+    <div class="start-btn">GAME START</div>
+    <p>画面をタップして開始してください</p>
+</div>
+
+<div id="container">
+    <div class="hud-container">
+        <div class="hud" id="score-text">Score: 0</div>
+        <div class="hud" id="time-text">Time: 90</div>
+    </div>
+    <div id="status-text">待機中</div>
+    <div id="question-area">
+        <div id="main-q" class="main-q">READY</div>
+        <div id="voice-instruction-hint"></div>
+        <div id="correct-circle" class="correct-circle"></div>
+    </div>
+    <div id="transcript-view">準備中...</div>
+</div>
+
+<script>
+    const scoreText = document.getElementById('score-text');
+    const timeText = document.getElementById('time-text');
+    const statusText = document.getElementById('status-text');
+    const mainQ = document.getElementById('main-q');
+    const voiceHint = document.getElementById('voice-instruction-hint');
+    const correctCircle = document.getElementById('correct-circle');
+    const transcriptView = document.getElementById('transcript-view');
+    const startOverlay = document.getElementById('start-overlay');
+
+    let score = 0;
+    let timeLeft = 90; 
+    let gameStarted = false;
+    let currentAns = null;
+    let isReadyToAnswer = false;
+    let startTime = null;
+    let audioCtx;
+    let audioUnlocked = false;
+
+    const kanjiMap = {'零':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
+    const synth = window.speechSynthesis;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+
+    // 音声認識の初期化
+    function setupRecognition() {
+        if (!SpeechRecognition) {
+            transcriptView.textContent = "このブラウザは音声認識非対応です";
+            return;
+        }
+        recognition = new SpeechRecognition();
+        recognition.lang = 'ja-JP';
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event) => {
+            let resultText = "";
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                resultText += event.results[i][0].transcript;
+            }
+            transcriptView.textContent = `認識: ${resultText}`;
+
+            if (gameStarted && isReadyToAnswer) {
+                if (checkAnswer(resultText)) handleCorrect();
+            } else if (!gameStarted && (resultText.includes("スタート") || resultText.includes("もう一回"))) {
+                initGame();
+            }
+        };
+
+        recognition.onend = () => {
+            // ゲーム中かつ音声合成が喋っていない場合のみ再起動
+            if (audioUnlocked) {
+                try { recognition.start(); } catch(e) {}
+            }
+        };
+
+        recognition.onerror = (e) => {
+            console.warn("Recognition Error:", e.error);
+            // Chromebookでのエラー対策：一旦止めてから再開
+            if (e.error === 'network') {
+                transcriptView.textContent = "ネットワークエラー発生";
+            }
+        };
+    }
+
+    setupRecognition();
+
+    async function handleStartInteraction() {
+        // 1. AudioContextの初期化
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        
+        audioUnlocked = true;
+        startOverlay.style.display = 'none';
+
+        // 2. 音声認識の強制開始
+        if (recognition) {
+            try {
+                recognition.stop(); // 念のため一度止める
+                setTimeout(() => recognition.start(), 100);
+            } catch(e) {
+                console.log("Recognition init error", e);
+            }
+        }
+
+        // 3. 音声合成のウォームアップ
+        synth.cancel();
+        const ut = new SpeechSynthesisUtterance("スタート");
+        ut.lang = 'ja-JP';
+        ut.volume = 0; // 最初は無音で「喋れる状態」にする
+        synth.speak(ut);
+
+        // 4. ゲーム開始
+        initGame();
+    }
+
+    function speak(text, callback) {
+        if (!audioUnlocked) return;
+        isReadyToAnswer = false;
+
+        const uttr = new SpeechSynthesisUtterance(text);
+        uttr.lang = 'ja-JP';
+        uttr.rate = 1.4; 
+        
+        uttr.onend = () => {
+            if (gameStarted) {
+                isReadyToAnswer = true;
+                if(callback) callback();
+            }
+        };
+        synth.speak(uttr);
+    }
+
+    function checkAnswer(text) {
+        let processed = text;
+        for (let key in kanjiMap) {
+            processed = processed.replace(new RegExp(key, 'g'), kanjiMap[key]);
+        }
+        const matches = processed.match(/\d+/g);
+        if (!matches) return false;
+        return matches.some(numStr => parseInt(numStr) === currentAns);
+    }
+
+    function initGame() {
+        score = 0;
+        scoreText.textContent = `Score: ${score}`;
+        timeLeft = 90;
+        gameStarted = true;
+        statusText.textContent = "ゲーム中...";
+        startTime = Date.now();
+        
+        generateQuestion();
+        updateTimer();
+    }
+
+    function generateQuestion() {
+        isReadyToAnswer = false; 
+        
+        let n1 = Math.floor(Math.random() * 9) + 1; 
+        let n2 = Math.floor(Math.random() * 9) + 1; 
+        let op, baseAns;
+
+        if (Math.random() > 0.5) {
+            op = "+";
+            baseAns = n1 + n2;
+        } else {
+            if (n1 < n2) [n1, n2] = [n2, n1];
+            if (n1 === n2) n1++; 
+            op = "-";
+            baseAns = n1 - n2;
+        }
+
+        let voiceVal = Math.floor(Math.random() * 9) + 1; 
+        let isPlus = Math.random() > 0.5;
+        if (!isPlus && (baseAns - voiceVal < 1)) isPlus = true; 
+
+        currentAns = isPlus ? (baseAns + voiceVal) : (baseAns - voiceVal);
+        
+        mainQ.textContent = `${n1}${op}${n2}`;
+        voiceHint.textContent = "指示を聞いて...";
+        transcriptView.textContent = "（聞き取り準備中）";
+        
+        const voiceText = isPlus ? `${voiceVal}を足して` : `${voiceVal}を引いて`;
+        
+        speak(voiceText, () => {
+            voiceHint.textContent = "答えをどうぞ！";
+            transcriptView.textContent = "どうぞ！";
+        });
+    }
+
+    function handleCorrect() {
+        isReadyToAnswer = false; 
+        score++;
+        scoreText.textContent = `Score: ${score}`;
+        
+        const osc = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        osc.connect(g).connect(audioCtx.destination);
+        osc.frequency.value = 880;
+        g.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.1);
+        
+        mainQ.textContent = currentAns;
+        voiceHint.textContent = "正解！";
+        correctCircle.style.display = "block";
+
+        setTimeout(() => {
+            correctCircle.style.display = "none";
+            if (gameStarted) generateQuestion();
+        }, 600);
+    }
+
+    function updateTimer() {
+        if (!gameStarted) return;
+        const now = Date.now();
+        const elapsed = Math.floor((now - startTime) / 1000);
+        timeLeft = Math.max(0, 90 - elapsed);
+        timeText.textContent = `Time: ${timeLeft}`;
+        
+        if (timeLeft <= 0) endGame();
+        else requestAnimationFrame(updateTimer);
+    }
+
+    function endGame() {
+        gameStarted = false;
+        isReadyToAnswer = false;
+        mainQ.textContent = "終了";
+        voiceHint.textContent = "";
+        speak(`終了です。${score}点でした。もう一度やるなら、スタートと言ってください。`);
+        statusText.textContent = "「スタート」でリスタート";
+    }
+</script>
+</body>
+</html>
